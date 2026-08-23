@@ -1,15 +1,17 @@
 -- ============================================================
 -- base_core/install.lua
--- Bootstrap installer — one command to install BaseCore OS
--- ============================================================
--- Usage on any CC computer:
---   wget run https://raw.githubusercontent.com/USER/REPO/main/base_core/install.lua
+-- Универсальный загрузчик и инсталлятор BaseCore OS & NexiNet
+-- Установка всей системы одной командой:
+--   wget run https://raw.githubusercontent.com/AvelcFox/cc-test/main/base_core/install.lua [role]
 -- ============================================================
 
 local GITHUB_USER = "AvelcFox"
 local GITHUB_REPO = "cc-test"
 local BRANCH      = "main"
-local BASE_URL    = "https://raw.githubusercontent.com/"..GITHUB_USER.."/"..GITHUB_REPO.."/"..BRANCH
+local BASE_URL    = "https://raw.githubusercontent.com/" .. GITHUB_USER .. "/" .. GITHUB_REPO .. "/" .. BRANCH
+
+local args = { ... }
+local targetRole = args[1] -- Опциональный аргумент роли для тихой установки (server|radar|glasses|storage|relay|pocket)
 
 local FILES = {
     "base_core/config.lua",
@@ -28,11 +30,13 @@ local FILES = {
     "base_core/clients/relay_node.lua",
     "base_core/clients/satellite_node.lua",
     "base_core/clients/storage_node.lua",
+    "base_core/services/automation_service.lua",
     "base_core/services/create_service.lua",
     "base_core/services/openclaw_bridge.lua",
     "base_core/services/radar_service.lua",
     "base_core/services/relay_service.lua",
     "base_core/services/storage_service.lua",
+    "base_core/tools/rules_cli.lua",
 }
 
 local function ensureDir(path)
@@ -50,14 +54,17 @@ end
 term.clear()
 term.setCursorPos(1, 1)
 print("========================================")
-print("   BaseCore OS - GitHub Installer       ")
-print("   Server: " .. GITHUB_USER .. "/" .. GITHUB_REPO)
+print("     BASECORE OS: UNIVERSAL INSTALL     ")
+print("     Repo: " .. GITHUB_USER .. "/" .. GITHUB_REPO .. " (" .. BRANCH .. ")")
 print("========================================")
 print()
 
 local ok, fail = 0, 0
-for _, path in ipairs(FILES) do
-    io.write("  " .. path .. " ... ")
+local total = #FILES
+
+for i, path in ipairs(FILES) do
+    local pct = math.floor((i / total) * 100)
+    io.write(string.format("[%2d%%] %-34s ", pct, path))
     ensureDir(path)
     local url = BASE_URL .. "/" .. path
     local response = http.get(url)
@@ -72,7 +79,7 @@ for _, path in ipairs(FILES) do
                 print("[OK]")
                 ok = ok + 1
             else
-                print("[WRITE ERROR]")
+                print("[ERR]")
                 fail = fail + 1
             end
         else
@@ -87,20 +94,47 @@ end
 
 print()
 print("========================================")
-print("  Installed: " .. ok .. " | Failed: " .. fail)
+print(string.format("  Downloaded: %d / %d | Errors: %d", ok, total, fail))
 print("========================================")
 
+local roleMap = {
+    server  = "/base_core/server/main.lua",
+    main    = "/base_core/server/main.lua",
+    radar   = "/base_core/clients/radar_node.lua",
+    glasses = "/base_core/clients/glasses_hud.lua",
+    hud     = "/base_core/clients/glasses_hud.lua",
+    storage = "/base_core/clients/storage_node.lua",
+    vault   = "/base_core/clients/storage_node.lua",
+    relay   = "/base_core/clients/relay_node.lua",
+    farm    = "/base_core/clients/relay_node.lua",
+    pocket  = "/base_core/clients/pocket_remote.lua",
+}
+
 if fail == 0 then
-    print()
-    print("Run setup now? (y/n)")
-    io.write("> ")
-    local ans = read()
-    if ans == "y" or ans == "Y" then
-        shell.run("/base_core/installer.lua")
+    if targetRole and roleMap[targetRole:lower()] then
+        local entryPoint = roleMap[targetRole:lower()]
+        local f = fs.open("startup.lua", "w")
+        if f then
+            f.writeLine("-- Auto-generated startup by BaseCore Installer")
+            f.writeLine("shell.run(\"" .. entryPoint .. "\")")
+            f.close()
+            print(string.format("[SUCCESS] Configured startup.lua for role: %s", targetRole:upper()))
+            print("Rebooting computer in 2 seconds...")
+            sleep(2)
+            os.reboot()
+        end
     else
-        print("To setup later, run: /base_core/installer.lua")
+        print()
+        print("Launch Interactive Role Wizard now? (Y/n)")
+        io.write("> ")
+        local ans = read()
+        if ans == "" or ans == "y" or ans == "Y" then
+            shell.run("/base_core/installer.lua")
+        else
+            print("To setup role anytime, run: base_core/installer")
+        end
     end
 else
-    print("Some files failed. Check your GitHub repo settings.")
-    print("Make sure GITHUB_USER and GITHUB_REPO are correct.")
+    print("WARNING: Some files failed to download.")
+    print("Check your internet/HTTP whitelist settings or GitHub repo branch.")
 end
