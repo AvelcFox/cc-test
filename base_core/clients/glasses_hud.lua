@@ -1,7 +1,7 @@
 -- ============================================================
 -- base_core/clients/glasses_hud.lua
 -- Клиент дополненной реальности (AR HUD) для Smart Glasses AP 0.8
--- Полная поддержка нативной архитектуры Smart Glasses и getEyePosition
+-- Персистентные объекты: БЕЗ CLEAR(), БЕЗ МЕРЦАНИЯ, 60 FPS
 -- ============================================================
 
 local Config   = require("/base_core/config")
@@ -35,11 +35,11 @@ local playerPos = { x = 0, y = 0, z = 0 }
 local hasGPS = false
 
 local NOTIF_LIFETIME = Config.GLASSES.NOTIF_DURATION or 10
-local MAX_NOTIFS     = Config.GLASSES.MAX_NOTIFICATIONS or 5
+local MAX_NOTIFS     = 4
 
 local COLORS = {
     bg          = 0x111122,
-    panel       = 0x1A1A2E,
+    panel       = 0x151525,
     border      = 0x334466,
     text        = 0xFFFFFF,
     textDim     = 0x8899AA,
@@ -62,31 +62,27 @@ local SEV_MAP = {
 
 -- ── Поиск модуля Overlay в AP 0.8 ─────────────────────────────
 
--- 1. Проверяем нативный глобальный API Smart Glasses
 if smartglasses and smartglasses.modules then
-    pcall(function()
-        overlay = smartglasses.modules.overlay
-    end)
+    pcall(function() overlay = smartglasses.modules.overlay end)
 end
 
--- 2. Проверяем все подключенные периферии
 if not overlay then
     for _, name in ipairs(peripheral.getNames()) do
         local p = peripheral.wrap(name)
         if p then
             if p.getModule then
                 pcall(function() overlay = p.getModule("overlay") end)
-            elseif p.createRectangle or p.createText or p.addBox then
+            elseif p.createRectangle or p.createText then
                 overlay = p
             end
 
-            if p.playSound or peripheral.getType(name):find("speaker", 1, true) then
+            if p.playSound or p.playNote or peripheral.getType(name):find("speaker", 1, true) then
                 speaker = p
                 print("[OK] Speaker: " .. name)
             end
         end
         if overlay then
-            print("[OK] Smart Glasses Module attached on: " .. name)
+            print("[OK] Smart Glasses Module on: " .. name)
             break
         end
     end
@@ -95,7 +91,9 @@ end
 if not overlay then
     print("[WARN] Overlay module not bound yet. Make sure Smart Glasses have Overlay Module equipped.")
 else
-    print("[OK] Overlay active: createRectangle & getEyePosition ready.")
+    if overlay.setAutoUpdate then pcall(overlay.setAutoUpdate, true) end
+    pcall(overlay.clear) -- Очищаем один раз при старте
+    print("[OK] Overlay active: Persistent Zero-Flicker Renderer ready.")
 end
 
 -- ── Звуковые эффекты через Speaker ───────────────────────────
@@ -103,17 +101,21 @@ end
 local function playSound(severity)
     if not speaker or not Config.GLASSES.PLAY_SOUNDS then return end
     local sounds = {
-        critical = { "minecraft:block.note_block.bit", 0.5, 1.2 },
-        danger   = { "minecraft:block.note_block.bit", 0.6, 1.0 },
-        warning  = { "minecraft:block.note_block.bit", 0.8, 1.0 },
-        success  = { "minecraft:block.note_block.pling", 2.0, 0.6 },
-        info     = { "minecraft:block.note_block.harp", 1.5, 0.5 },
+        critical = { "minecraft:block.note_block.bit", 1.0, 1.2 },
+        danger   = { "minecraft:block.note_block.bit", 1.0, 1.0 },
+        warning  = { "minecraft:block.note_block.bit", 1.0, 1.0 },
+        success  = { "minecraft:block.note_block.pling", 2.0, 0.8 },
+        info     = { "minecraft:block.note_block.harp", 1.5, 0.6 },
     }
     local snd = sounds[severity] or sounds.info
-    pcall(function() speaker.playSound(snd[1], snd[3], snd[2]) end)
+    pcall(function()
+        if speaker.playSound then
+            speaker.playSound(snd[1], snd[3], snd[2])
+        elseif speaker.playNote then
+            speaker.playNote("pling", snd[3], 12)
+        end
+    end)
 end
-
--- ── Добавление уведомления ───────────────────────────────────
 
 local function addNotification(notif)
     table.insert(notifications, 1, {
@@ -131,22 +133,241 @@ local function addNotification(notif)
     playSound(notif.severity)
 end
 
--- ── Опрос позиции игрока через встроенный getEyePosition / GPS ─
+-- ── Персистентные объекты интерфейса ──────────────────────────
+
+local hudUI = {
+    initialized = false,
+    -- Базовый виджет
+    bgPanel     = nil,
+    txtHeader   = nil,
+    txtTime     = nil,
+    txtStress   = nil,
+    bgStress    = nil,
+    barStress   = nil,
+    txtVault    = nil,
+    bgVault     = nil,
+    barVault    = nil,
+    txtRadar    = nil,
+    txtGPS      = nil,
+    -- Уведомления (4 слота)
+    notifs      = {},
+}
+
+local function initHUDObjects()
+    if not overlay or hudUI.initialized then return end
+
+    local bx, by = 280, 8
+    local bw, bh = 145, 68
+
+    -- 1. Фоновые панели виджета базы (Z = 0)
+    hudUI.bgPanel = overlay.createRectangle({
+        x = bx, y = by, z = 0.0,
+        sizeX = bw, sizeY = bh,
+        color = COLORS.panel, opacity = 0.65,
+    })
+
+    -- Шкалы прогресса (Z = 1 фоновые дорожки, Z = 2 заполнение)
+    hudUI.bgStress = overlay.createRectangle({
+        x = bx + 52, y = by + 19, z = 1.0,
+        sizeX = 85, sizeY = 5,
+        color = 0x222233, opacity = 0.5,
+    })
+    hudUI.barStress = overlay.createRectangle({
+        x = bx + 52, y = by + 19, z = 2.0,
+        sizeX = 0, sizeY = 5,
+        color = COLORS.success, opacity = 0.9,
+    })
+
+    hudUI.bgVault = overlay.createRectangle({
+        x = bx + 52, y = by + 29, z = 1.0,
+        sizeX = 85, sizeY = 5,
+        color = 0x222233, opacity = 0.5,
+    })
+    hudUI.barVault = overlay.createRectangle({
+        x = bx + 52, y = by + 29, z = 2.0,
+        sizeX = 0, sizeY = 5,
+        color = COLORS.info, opacity = 0.9,
+    })
+
+    -- 2. Текстовые метки поверх фона (Z = 5)
+    hudUI.txtHeader = overlay.createText({
+        x = bx + 6, y = by + 4, z = 5.0,
+        content = Config.SERVER.NAME .. " BASE STATUS",
+        color = COLORS.header, fontSize = 0.8, shadow = true,
+    })
+    hudUI.txtTime = overlay.createText({
+        x = bx + bw - 32, y = by + 4, z = 5.0,
+        content = "12:00",
+        color = COLORS.textDim, fontSize = 0.7, shadow = true,
+    })
+    hudUI.txtStress = overlay.createText({
+        x = bx + 6, y = by + 18, z = 5.0,
+        content = "SU: 0%",
+        color = COLORS.text, fontSize = 0.7, shadow = true,
+    })
+    hudUI.txtVault = overlay.createText({
+        x = bx + 6, y = by + 28, z = 5.0,
+        content = "VAULT: 0%",
+        color = COLORS.text, fontSize = 0.7, shadow = true,
+    })
+    hudUI.txtRadar = overlay.createText({
+        x = bx + 6, y = by + 39, z = 5.0,
+        content = "PERIMETER SECURE",
+        color = COLORS.success, fontSize = 0.7, shadow = true,
+    })
+    hudUI.txtGPS = overlay.createText({
+        x = bx + 6, y = by + 52, z = 5.0,
+        content = "GPS: OFFLINE",
+        color = COLORS.textDim, fontSize = 0.7, shadow = true,
+    })
+
+    -- 3. Слоты всплывающих уведомлений (Слева, 4 слота)
+    local ny = 40
+    for i = 1, MAX_NOTIFS do
+        local slot = {}
+        slot.bg = overlay.createRectangle({
+            x = 8, y = ny, z = 0.0,
+            sizeX = 200, sizeY = 24,
+            color = COLORS.panel, opacity = 0.0, enabled = false,
+        })
+        slot.title = overlay.createText({
+            x = 14, y = ny + 3, z = 5.0,
+            content = "",
+            color = COLORS.info, fontSize = 0.65, shadow = true, enabled = false,
+        })
+        slot.body = overlay.createText({
+            x = 14, y = ny + 12, z = 5.0,
+            content = "",
+            color = COLORS.text, fontSize = 0.7, shadow = true, enabled = false,
+        })
+        hudUI.notifs[i] = slot
+        ny = ny + 28
+    end
+
+    hudUI.initialized = true
+    print("[OK] HUD visual elements instantiated in VRAM.")
+end
+
+-- ── Мгновенное обновление свойств без удаления (60 FPS) ───────
+
+local function updateHUD()
+    if not hudUI.initialized then
+        initHUDObjects()
+        if not hudUI.initialized then return end
+    end
+
+    local curTime = textutils.formatTime(os.time(), true)
+
+    -- Обновляем время
+    if hudUI.txtTime and hudUI.txtTime.setContent then
+        hudUI.txtTime.setContent(curTime)
+    end
+
+    -- Обновляем Create Stress
+    local stressPct = telemetryData.stressPct or 0
+    local stressCol = stressPct > 85 and COLORS.threat or (stressPct > 70 and COLORS.warning or COLORS.success)
+    if hudUI.txtStress and hudUI.txtStress.setContent then
+        hudUI.txtStress.setContent(string.format("SU: %d%%", stressPct))
+    end
+    if hudUI.barStress then
+        local fillW = math.max(0, math.floor((85 * math.min(100, math.max(0, stressPct))) / 100))
+        if hudUI.barStress.setSizeX then hudUI.barStress.setSizeX(fillW) end
+        if hudUI.barStress.setSizes then hudUI.barStress.setSizes(fillW, 5) end
+        if hudUI.barStress.setColor then hudUI.barStress.setColor(stressCol) end
+    end
+
+    -- Обновляем Storage
+    local storagePct = telemetryData.storagePct or 0
+    if hudUI.txtVault and hudUI.txtVault.setContent then
+        hudUI.txtVault.setContent(string.format("VAULT: %d%%", storagePct))
+    end
+    if hudUI.barVault then
+        local fillW = math.max(0, math.floor((85 * math.min(100, math.max(0, storagePct))) / 100))
+        if hudUI.barVault.setSizeX then hudUI.barVault.setSizeX(fillW) end
+        if hudUI.barVault.setSizes then hudUI.barVault.setSizes(fillW, 5) end
+    end
+
+    -- Обновляем Радар
+    if hudUI.txtRadar and hudUI.txtRadar.setContent then
+        local radCol = telemetryData.threatCount > 0 and COLORS.threat or COLORS.success
+        local radTxt = telemetryData.threatCount > 0 and string.format("THREATS: %d", telemetryData.threatCount) or "PERIMETER SECURE"
+        hudUI.txtRadar.setContent(radTxt)
+        if hudUI.txtRadar.setColor then hudUI.txtRadar.setColor(radCol) end
+    end
+
+    -- Обновляем GPS
+    if hudUI.txtGPS and hudUI.txtGPS.setContent then
+        local posStr = hasGPS and string.format("GPS: %d, %d, %d", playerPos.x, playerPos.y, playerPos.z) or "GPS: OFFLINE"
+        hudUI.txtGPS.setContent(posStr)
+        if hudUI.txtGPS.setColor then hudUI.txtGPS.setColor(hasGPS and COLORS.coords or COLORS.textDim) end
+    end
+
+    -- Обновляем всплывающие уведомления (плавное затухание)
+    local now = os.clock()
+    for i = 1, MAX_NOTIFS do
+        local slot = hudUI.notifs[i]
+        local notif = notifications[i]
+        if slot and notif then
+            local age = now - notif.time
+            if age < NOTIF_LIFETIME then
+                local sevInfo = SEV_MAP[notif.severity] or SEV_MAP.info
+                local alpha = math.max(0.05, 1.0 - (age / NOTIF_LIFETIME))
+
+                if slot.bg and slot.bg.setEnabled then slot.bg.setEnabled(true) end
+                if slot.bg and slot.bg.setOpacity then slot.bg.setOpacity(alpha * 0.7) end
+
+                if slot.title and slot.title.setEnabled then slot.title.setEnabled(true) end
+                if slot.title and slot.title.setContent then slot.title.setContent("[" .. sevInfo.label .. "] " .. (notif.source or "SYS")) end
+                if slot.title and slot.title.setColor then slot.title.setColor(sevInfo.color) end
+
+                local msg = notif.text or ""
+                if #msg > 34 then msg = msg:sub(1, 32) .. ".." end
+                if slot.body and slot.body.setEnabled then slot.body.setEnabled(true) end
+                if slot.body and slot.body.setContent then slot.body.setContent(msg) end
+            else
+                if slot.bg and slot.bg.setEnabled then slot.bg.setEnabled(false) end
+                if slot.title and slot.title.setEnabled then slot.title.setEnabled(false) end
+                if slot.body and slot.body.setEnabled then slot.body.setEnabled(false) end
+            end
+        elseif slot then
+            if slot.bg and slot.bg.setEnabled then slot.bg.setEnabled(false) end
+            if slot.title and slot.title.setEnabled then slot.title.setEnabled(false) end
+            if slot.body and slot.body.setEnabled then slot.body.setEnabled(false) end
+        end
+    end
+
+    -- Синхронизация изменений с клиентом
+    if overlay and overlay.update then
+        pcall(overlay.update)
+    end
+end
+
+-- ── Опрос позиции игрока ──────────────────────────────────────
 
 local function updateCoordinates()
     local updated = false
 
-    -- 1. Нативный метод getEyePosition прямо из очков AP 0.8
     if overlay and overlay.getEyePosition then
-        local ok, pos = pcall(overlay.getEyePosition)
-        if ok and pos and pos.x then
-            playerPos = { x = math.floor(pos.x), y = math.floor(pos.y), z = math.floor(pos.z) }
-            hasGPS = true
-            updated = true
+        local res = { pcall(overlay.getEyePosition) }
+        if res[1] then
+            if type(res[2]) == "number" and type(res[3]) == "number" and type(res[4]) == "number" then
+                playerPos = { x = math.floor(res[2]), y = math.floor(res[3]), z = math.floor(res[4]) }
+                hasGPS = true
+                updated = true
+            elseif type(res[2]) == "table" then
+                local t = res[2]
+                local px = tonumber(t.x or t[1])
+                local py = tonumber(t.y or t[2]) or 0
+                local pz = tonumber(t.z or t[3])
+                if px and pz then
+                    playerPos = { x = math.floor(px), y = math.floor(py), z = math.floor(pz) }
+                    hasGPS = true
+                    updated = true
+                end
+            end
         end
     end
 
-    -- 2. GPS резерв
     if not updated and gps and gps.locate then
         local gx, gy, gz = gps.locate(1)
         if gx then
@@ -156,138 +377,11 @@ local function updateCoordinates()
         end
     end
 
-    -- Транслируем координаты в сеть на Радар
     if hasGPS then
         Net.broadcast(Protocol.TYPE.TELEMETRY, {
             role      = "glasses_hud",
             playerPos = playerPos,
         })
-    end
-end
-
--- ── Безопасные методы отрисовки ───────────────────────────────
-
-local function addBox(x, y, w, h, color, alpha)
-    if not overlay then return end
-    if overlay.createRectangle then
-        pcall(overlay.createRectangle, {
-            pos   = { x, y },
-            sizes = { w, h },
-            color = color,
-            alpha = alpha or 0.65,
-        })
-    elseif overlay.rectangle then
-        pcall(overlay.rectangle, {
-            pos   = { x, y },
-            sizes = { w, h },
-            color = color,
-            alpha = alpha or 0.65,
-        })
-    elseif overlay.addBox then
-        pcall(overlay.addBox, x, y, w, h, color)
-    end
-end
-
-local function addText(x, y, text, color, scale)
-    if not overlay then return end
-    if overlay.createText then
-        pcall(overlay.createText, {
-            pos   = { x, y },
-            text  = tostring(text),
-            color = color,
-            scale = scale or 1.0,
-        })
-    elseif overlay.text then
-        pcall(overlay.text, {
-            pos   = { x, y },
-            text  = tostring(text),
-            color = color,
-            scale = scale or 1.0,
-        })
-    elseif overlay.addText then
-        pcall(overlay.addText, x, y, tostring(text), color)
-    end
-end
-
-local function drawWidgetBox(x, y, w, h, bgCol, borderCol, alpha)
-    addBox(x, y, w, h, bgCol, alpha or 0.65)
-end
-
-local function drawProgressBar(x, y, w, h, pct, fillCol, bgCol)
-    addBox(x, y, w, h, bgCol or 0x222233, 0.5)
-    local fillW = math.max(0, math.floor((w * math.min(100, math.max(0, pct))) / 100))
-    if fillW > 0 then
-        addBox(x, y, fillW, h, fillCol, 0.9)
-    end
-end
-
--- ── Отрисовка HUD ─────────────────────────────────────────────
-
-local function renderHUD()
-    if not overlay then
-        -- Попытка динамически перепривязать оверлей
-        if smartglasses and smartglasses.modules and smartglasses.modules.overlay then
-            overlay = smartglasses.modules.overlay
-        end
-        if not overlay then return end
-    end
-
-    pcall(function()
-        if overlay.clear then overlay.clear() end
-    end)
-
-    local curTime = textutils.formatTime(os.time(), true)
-
-    -- 1. Виджет базы (Справа вверху)
-    if Config.GLASSES.SHOW_STATUS_BAR then
-        local bx, by = 280, 8
-        local bw, bh = 145, hasGPS and 82 or 68
-
-        drawWidgetBox(bx, by, bw, bh, COLORS.panel, COLORS.border, 0.7)
-
-        addText(bx + 6, by + 4, Config.SERVER.NAME .. " BASE STATUS", COLORS.header, 0.8)
-        addText(bx + bw - 32, by + 4, curTime, COLORS.textDim, 0.7)
-
-        -- Stress
-        local stressCol = telemetryData.stressPct > 85 and COLORS.threat or (telemetryData.stressPct > 70 and COLORS.warning or COLORS.success)
-        addText(bx + 6, by + 18, string.format("SU: %d%%", telemetryData.stressPct), COLORS.text, 0.7)
-        drawProgressBar(bx + 52, by + 19, 85, 5, telemetryData.stressPct, stressCol)
-
-        -- Storage
-        addText(bx + 6, by + 28, string.format("VAULT: %d%%", telemetryData.storagePct), COLORS.text, 0.7)
-        drawProgressBar(bx + 52, by + 29, 85, 5, telemetryData.storagePct, COLORS.info)
-
-        -- Radar
-        local radCol = telemetryData.threatCount > 0 and COLORS.threat or COLORS.success
-        local radTxt = telemetryData.threatCount > 0 and string.format("THREATS: %d", telemetryData.threatCount) or "PERIMETER SECURE"
-        addText(bx + 6, by + 39, radTxt, radCol, 0.7)
-
-        -- Координаты GPS из очков
-        if hasGPS then
-            local posStr = string.format("GPS: %d, %d, %d", playerPos.x, playerPos.y, playerPos.z)
-            addText(bx + 6, by + 52, posStr, COLORS.coords, 0.7)
-        end
-    end
-
-    -- 2. Всплывающие алерты (Слева)
-    local ny = 40
-    local now = os.clock()
-
-    for i, notif in ipairs(notifications) do
-        local age = now - notif.time
-        if age < NOTIF_LIFETIME then
-            local sevInfo = SEV_MAP[notif.severity] or SEV_MAP.info
-            local alpha = math.max(0.1, 1.0 - (age / NOTIF_LIFETIME))
-
-            drawWidgetBox(8, ny, 200, 24, COLORS.panel, sevInfo.color, alpha * 0.75)
-            addText(14, ny + 3, "[" .. sevInfo.label .. "] " .. (notif.source or "SYS"), sevInfo.color, 0.65)
-
-            local msg = notif.text or ""
-            if #msg > 34 then msg = msg:sub(1, 32) .. ".." end
-            addText(14, ny + 12, msg, COLORS.text, 0.7)
-
-            ny = ny + 28
-        end
     end
 end
 
@@ -312,14 +406,14 @@ end)
 local function gpsLoop()
     while true do
         updateCoordinates()
-        sleep(2.0)
+        sleep(1.0)
     end
 end
 
 local function renderLoop()
     while true do
-        renderHUD()
-        sleep(1.0)
+        pcall(updateHUD)
+        sleep(0.05) -- 20 FPS идеально плавное обновление без малейшего мерцания
     end
 end
 
