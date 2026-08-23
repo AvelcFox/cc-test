@@ -11,8 +11,9 @@ local Net            = require("/base_core/lib/net")
 local CreateService  = require("/base_core/services/create_service")
 local StorageService = require("/base_core/services/storage_service")
 local RadarService   = require("/base_core/services/radar_service")
-local Dashboard      = require("/base_core/server/dashboard")
-local OpenClaw       = require("/base_core/services/openclaw_bridge")
+local Dashboard         = require("/base_core/server/dashboard")
+local OpenClaw          = require("/base_core/services/openclaw_bridge")
+local AutomationService = require("/base_core/services/automation_service")
 
 term.clear()
 term.setCursorPos(1, 1)
@@ -164,6 +165,9 @@ local function telemetryLoop()
             Net.broadcast(Protocol.TYPE.ALERT, { text = txt, severity = sev, source = "KINETIC" })
             OpenClaw.sendAlert({ text = txt, severity = sev, source = "KINETIC" })
         end
+
+        -- Оценка и выполнение правил автоматизации (пороги предметов, защита Create и т.д.)
+        AutomationService.evaluate(serverState)
 
         -- Синхронизация с OpenClaw сервером
         OpenClaw.syncTelemetry(serverState)
