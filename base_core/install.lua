@@ -6,8 +6,8 @@
 --   wget run https://raw.githubusercontent.com/USER/REPO/main/base_core/install.lua
 -- ============================================================
 
-local GITHUB_USER = "YOUR_USERNAME"
-local GITHUB_REPO = "YOUR_REPO"
+local GITHUB_USER = "AvelcFox"
+local GITHUB_REPO = "cc-test"
 local BRANCH      = "main"
 local BASE_URL    = "https://raw.githubusercontent.com/"..GITHUB_USER.."/"..GITHUB_REPO.."/"..BRANCH
 
