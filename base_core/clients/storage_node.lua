@@ -160,61 +160,12 @@ local function scanAllStorage()
     }
 end
 
--- Проверка порогов и авто-переключение реле ферм
-local function processAutomation(counts)
-    for _, rule in ipairs(autoRules) do
-        local currentCount = counts[rule.itemId] or 0
-        local targetRelay = rule.targetRelay
-
-        if currentCount < rule.min and not rule.active then
-            rule.active = true
-            saveRules()
-            print(string.format("[AUTO] Low stock '%s' (%d < %d) -> Enabling '%s'", rule.label, currentCount, rule.min, targetRelay))
-            
-            -- Отправляем команду включения реле на реле-ноды
-            Net.broadcast(Protocol.TYPE.COMMAND, {
-                action = "SET_RELAY",
-                name   = targetRelay,
-                state  = true,
-            })
-
-            -- Оповещаем Smart Glasses и Монитор
-            Net.broadcast(Protocol.TYPE.ALERT, {
-                text     = string.format("AUTO: Started %s (Stock: %d < %d)", rule.label, currentCount, rule.min),
-                severity = Protocol.SEVERITY.INFO,
-                source   = "LOGISTICS",
-            })
-
-        elseif currentCount >= rule.max and rule.active then
-            rule.active = false
-            saveRules()
-            print(string.format("[AUTO] Full stock '%s' (%d >= %d) -> Disabling '%s'", rule.label, currentCount, rule.max, targetRelay))
-            
-            -- Отправляем команду выключения реле
-            Net.broadcast(Protocol.TYPE.COMMAND, {
-                action = "SET_RELAY",
-                name   = targetRelay,
-                state  = false,
-            })
-
-            Net.broadcast(Protocol.TYPE.ALERT, {
-                text     = string.format("AUTO: Stopped %s (Stock full: %d)", rule.label, currentCount),
-                severity = Protocol.SEVERITY.SUCCESS,
-                source   = "LOGISTICS",
-            })
-        end
-    end
-end
-
--- ── Главный цикл контроллера склада ──────────────────────────
+-- ── Главный цикл контроллера склада (Computer 10) ────────────
 
 while true do
     local storageData = scanAllStorage()
 
-    -- Проверяем правила авто-ферм
-    processAutomation(storageData.counts)
-
-    -- Транслируем данные склада в сеть BaseCore
+    -- Транслируем данные склада на Главный Сервер 0
     Net.broadcast(Protocol.TYPE.TELEMETRY, {
         role       = "storage_node",
         vaultCount = storageData.vaultCount,
@@ -225,10 +176,11 @@ while true do
         items      = storageData.items,
     })
 
-    -- Вывод на экран
+    -- Вывод статуса на терминал склада
     term.setCursorPos(1, 9)
     term.clearLine()
-    io.write(string.format("Units: %d | Used: %d / %d (%d%%) | Free: %d slots", storageData.vaultCount, storageData.usedSlots, storageData.totalSlots, storageData.pct, storageData.freeSlots))
+    io.write(string.format("Units: %d | Used: %d / %d (%d%%) | Free: %d slots",
+        storageData.vaultCount, storageData.usedSlots, storageData.totalSlots, storageData.pct, storageData.freeSlots))
 
     sleep(1.5)
 end
